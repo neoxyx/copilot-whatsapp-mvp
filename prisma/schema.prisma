@@ -1,0 +1,46 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Representa a cada usuario que escribe por WhatsApp
+model Contact {
+  id        String    @id @default(uuid())
+  jid       String    @unique // ej: "573157450493@s.whatsapp.net"
+  name      String?   // Nombre del perfil de WhatsApp si está disponible
+  isHandledByHuman Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+  leads     Lead[]
+}
+
+// Representa cada mensaje enviado o recibido
+model Message {
+  id        String   @id @default(uuid())
+  contactId String
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  role      String   // 'user' | 'assistant' | 'system'
+  content   String   // El texto del mensaje
+  createdAt DateTime @default(now())
+}
+
+// Representa un prospecto/lead calificado capturado por la IA
+model Lead {
+  id          String   @id @default(uuid())
+  contactId   String
+  contact     Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  fullName    String?
+  email       String?
+  companyName String?
+  notes       String?  // Detalles de lo que busca o necesita automatizar
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
