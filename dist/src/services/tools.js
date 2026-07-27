@@ -1,8 +1,10 @@
-import { ChatCompletionTool } from 'openai/resources/chat/completions';
-import { db } from '../lib/db';
-
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.tools = void 0;
+exports.executeToolCall = executeToolCall;
+const db_1 = require("../lib/db");
 // 1. Definición de la Tool para OpenAI
-export const tools: ChatCompletionTool[] = [
+exports.tools = [
     {
         type: 'function',
         function: {
@@ -50,16 +52,11 @@ export const tools: ChatCompletionTool[] = [
         },
     },
 ];
-
 // 2. Ejecutor de la función real en el Backend
-export async function executeToolCall(
-    toolName: string,
-    args: Record<string, any>,
-    contactId: string
-): Promise<string> {
+async function executeToolCall(toolName, args, contactId) {
     if (toolName === 'capture_lead') {
         try {
-            const lead = await db.lead.create({
+            const lead = await db_1.db.lead.create({
                 data: {
                     contactId: contactId,
                     fullName: args.fullName || null,
@@ -68,37 +65,35 @@ export async function executeToolCall(
                     notes: args.notes || null,
                 },
             });
-
             console.log(`🎯 [TOOL EXECUTED] Lead capturado con éxito ID: ${lead.id} (${args.fullName || 'Sin nombre'})`);
             return JSON.stringify({
                 status: 'success',
                 message: 'Información del prospecto guardada exitosamente en el sistema.',
                 leadId: lead.id,
             });
-        } catch (error) {
+        }
+        catch (error) {
             console.error('❌ Error al ejecutar tool capture_lead:', error);
             return JSON.stringify({ status: 'error', message: 'No se pudo guardar la información del lead.' });
         }
     }
-
     if (toolName === 'request_human_agent') {
         try {
             // Actualizamos la marca en la base de datos usando el id del contacto
-            await db.contact.update({
+            await db_1.db.contact.update({
                 where: { id: contactId },
                 data: { isHandledByHuman: true },
             });
-
             console.log(`👤 [HUMAN INTERVENTION] Transferido a humano por motivo: "${args.reason}"`);
             return JSON.stringify({
                 status: 'success',
                 message: 'Conversación marcada para atención humana. Notifica al cliente que un asesor tomará el control en breve.',
             });
-        } catch (error) {
+        }
+        catch (error) {
             console.error('❌ Error en request_human_agent:', error);
             return JSON.stringify({ status: 'error', message: 'No se pudo pausar la IA.' });
         }
     }
-
     return JSON.stringify({ status: 'error', message: 'Herramienta no encontrada.' });
 }

@@ -1,0 +1,64 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const dotenv_1 = __importDefault(require("dotenv"));
+const whatsapp_1 = require("./services/whatsapp");
+const openai_1 = require("./services/openai");
+dotenv_1.default.config();
+const app = (0, express_1.default)();
+// Middleware para parsear JSON con límite configurado
+app.use(express_1.default.json({ limit: process.env.BODY_PARSER_LIMIT || '10mb' }));
+const PORT = process.env.PORT || 3000;
+// 3. Webhook de Evolution API
+app.post('/webhook', async (req, res) => {
+    try {
+        const body = req.body;
+        console.log(`📡 Webhook recibido. Evento: "${body?.event}"`);
+        // Validamos estrictamente que sea un mensaje entrante
+        if (body.event?.toLowerCase() === 'messages.upsert' && body.data) {
+            const messageData = body.data;
+            const fromMe = messageData.key?.fromMe;
+            const fromNumber = messageData.key?.remoteJid;
+            // Ignoramos mensajes propios y grupos
+            if (!fromMe && messageData.message && fromNumber && !fromNumber.includes('@g.us')) {
+                const textReceived = messageData.message.conversation ||
+                    messageData.message.extendedTextMessage?.text;
+                if (textReceived) {
+                    console.log(`📩 [MESSAGES_UPSERT] Texto de [${fromNumber}]: "${textReceived}"`);
+                    // 1. RESPUESTA INMEDIATA A EVOLUTION API (Libera el hilo de red)
+                    res.status(200).send('EVENT_RECEIVED');
+                    // 2. PROCESAMIENTO ASÍNCRONO EN SEGUNDO PLANO
+                    setTimeout(async () => {
+                        try {
+                            console.log(`🧠 Procesando cerebro de IA para ${fromNumber}...`);
+                            const aiReply = await (0, openai_1.generateAIResponse)(fromNumber, textReceived);
+                            if (aiReply) {
+                                console.log(`🤖 IA Generó respuesta. Despachando a WhatsApp...`);
+                                await (0, whatsapp_1.sendWhatsAppMessage)(fromNumber, aiReply);
+                            }
+                            else {
+                                console.log(`ℹ️ Mensaje no enviado a ${fromNumber} porque el bot está en modo pausado.`);
+                            }
+                        }
+                        catch (bgError) {
+                            console.error('❌ Error en el hilo secundario de IA:', bgError);
+                        }
+                    }, 50);
+                    return;
+                }
+            }
+        }
+        // Si es cualquier otro evento (contacts.update, etc.), respondemos rápido y salimos
+        return res.status(200).send('OK');
+    }
+    catch (error) {
+        console.error('🔴 Error crítico en el Webhook:', error);
+        return res.sendStatus(500);
+    }
+});
+app.listen(PORT, () => {
+    console.log(`🚀 Servidor Express escuchando en el puerto ${PORT}`);
+});
