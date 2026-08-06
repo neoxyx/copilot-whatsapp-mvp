@@ -105,7 +105,7 @@ export async function generateAIResponse(phone: string, userMessageText: string)
         console.log(`🧠 [IA DINÁMICA] Procesando mensaje para ${phone} con Agente: "${agent.name}"...`);
 
         const response = await openai.chat.completions.create({
-            model: agent.model || 'gpt-4o',
+            model: agent.model || 'gpt-4o-mini',
             temperature: agent.temperature,
             messages: messages,
             tools: tools.length > 0 ? tools : undefined,
@@ -137,7 +137,7 @@ export async function generateAIResponse(phone: string, userMessageText: string)
                         });
 
                         const secondResponse = await openai.chat.completions.create({
-                            model: agent.model || 'gpt-4o',
+                            model: agent.model || 'gpt-4o-mini',
                             messages: messages,
                         });
 
