@@ -1,46 +1,180 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
 
 generator client {
   provider = "prisma-client-js"
 }
 
-datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+// ------------------------------------------------------
+// 1. CONFIGURACIÓN DEL AGENTE (TENANT / BOT)
+// ------------------------------------------------------
+model Agent {
+  id               String         @id @default(uuid())
+  name             String         @db.VarChar(100)
+  description      String?        @db.Text
+  isActive         Boolean        @default(true)
+  
+  // Prompts & Configuración de IA
+  systemPrompt     String         @db.Text
+  temperature      Float          @default(0.7)
+  model            String         @default("gpt-4o") // gpt-4o, gpt-4o-mini, gpt-4o-realtime-preview
+  
+  // Configuración de Voz / TTS
+  voiceProvider    String         @default("elevenlabs") // elevenlabs, openai
+  voiceId          String?        @db.VarChar(100) // ej: ID de voz colombiana
+  
+  // Relaciones
+  businessRules    BusinessRule[]
+  externalApis     ExternalApi[]
+  contacts         Contact[]
+  leads            Lead[]
+
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 }
 
-// Representa a cada usuario que escribe por WhatsApp
+// ------------------------------------------------------
+// 2. HERRAMIENTAS / APIS EXTERNAS (DYNAMIC TOOLS)
+// ------------------------------------------------------
+model ExternalApi {
+  id              String   @id @default(uuid())
+  agentId         String
+  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  name            String   @db.VarChar(100) // ej: "consultar_inventario" (Nombre para la Tool Call de OpenAI)
+  description     String   @db.Text        // Descripción que lee el LLM para decidir cuándo ejecutarla
+  endpointUrl     String   @db.Text        // Ej: "https://api.miempresa.com/v1/stock"
+  httpMethod      HttpMethod @default(POST)
+  
+  // Encabezados (Bearer Token, API Keys, etc.) en JSON: { "Authorization": "Bearer XYZ" }
+  headers         Json?
+  
+  // Parámetros JSON Schema para la definición de la Tool en OpenAI
+  // Ejemplo: { "type": "object", "properties": { "productCode": { "type": "string" } }, "required": ["productCode"] }
+  parameters      Json
+  
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([agentId])
+}
+
+enum HttpMethod {
+  GET
+  POST
+  PUT
+  DELETE
+}
+
+// ------------------------------------------------------
+// 3. REGLAS DE NEGOCIO (DECISION ENGINE)
+// ------------------------------------------------------
+model BusinessRule {
+  id            String       @id @default(uuid())
+  agentId       String
+  agent         Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  name          String       @db.VarChar(100)
+  priority      Int          @default(1) // Orden de evaluación (menor número = mayor prioridad)
+  
+  // Condición a evaluar (ej: "api_response.stock == 0", "user_message.contains('humano')")
+  condition     String       @db.Text
+  
+  // Acción a tomar cuando la condición se cumple
+  actionType    ActionType
+  
+  // Configuración adicional de la acción en formato JSON
+  // Ej: { "message": "En este momento no hay stock.", "transferTo": "support_queue" }
+  actionConfig  Json?
+  
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([agentId])
+}
+
+enum ActionType {
+  TRANSFER_HUMAN       // Activa Handover (isHandledByHuman = true)
+  SEND_CUSTOM_MESSAGE  // Responde con un mensaje predeterminado
+  EXECUTE_API          // Ejecuta una API secundaria
+  STOP_CONVERSATION    // Detiene la atención del bot
+}
+
+// ------------------------------------------------------
+// 4. CONTACTOS Y HISTORIAL DE CONVERSACIÓN
+// ------------------------------------------------------
 model Contact {
-  id        String    @id @default(uuid())
-  jid       String    @unique // ej: "573157450493@s.whatsapp.net"
-  name      String?   // Nombre del perfil de WhatsApp si está disponible
-  isHandledByHuman Boolean   @default(false)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  messages  Message[]
-  leads     Lead[]
+  id                 String     @id @default(uuid())
+  agentId            String
+  agent              Agent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  phone              String     @db.VarChar(50) // JID o teléfono (ej: 573000000000@s.whatsapp.net)
+  name               String?    @db.VarChar(100)
+  email              String?    @db.VarChar(100)
+  company            String?    @db.VarChar(100)
+  
+  // Estado de Atención Humana (Handover)
+  isHandledByHuman   Boolean    @default(false)
+  
+  // Variables dinámicas guardadas en el contexto de la conversación
+  // Ej: { "saldo": 50000, "categoria": "VIP" }
+  contextData        Json?
+  
+  messages           Message[]
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  @@unique([agentId, phone]) // Un contacto es único por agente
+  @@index([phone])
 }
 
-// Representa cada mensaje enviado o recibido
 model Message {
-  id        String   @id @default(uuid())
+  id        String      @id @default(uuid())
   contactId String
-  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  role      String   // 'user' | 'assistant' | 'system'
-  content   String   // El texto del mensaje
-  createdAt DateTime @default(now())
+  contact   Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  
+  role      MessageRole // user, assistant, system, tool
+  content   String      @db.Text
+  
+  // Si fue mensaje de voz o texto
+  type      MessageType @default(TEXT)
+  
+  createdAt DateTime    @default(now())
+
+  @@index([contactId])
 }
 
-// Representa un prospecto/lead calificado capturado por la IA
+enum MessageRole {
+  user
+  assistant
+  system
+  tool
+}
+
+enum MessageType {
+  TEXT
+  AUDIO
+}
+
+// ------------------------------------------------------
+// 5. PROSPECTOS CAPTURADOS (LEADS)
+// ------------------------------------------------------
 model Lead {
   id          String   @id @default(uuid())
-  contactId   String
-  contact     Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  fullName    String?
-  email       String?
-  companyName String?
-  notes       String?  // Detalles de lo que busca o necesita automatizar
+  agentId     String
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  name        String   @db.VarChar(100)
+  email       String?  @db.VarChar(100)
+  phone       String   @db.VarChar(50)
+  company     String?  @db.VarChar(100)
+  notes       String?  @db.Text
+  
   createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+
+  @@index([agentId])
 }
