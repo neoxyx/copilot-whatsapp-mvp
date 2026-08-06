@@ -61,10 +61,10 @@ export async function executeToolCall(
         try {
             const lead = await db.lead.create({
                 data: {
-                    contactId: contactId,
-                    fullName: args.fullName || null,
+                    name: args.fullName || 'Sin nombre',
                     email: args.email || null,
-                    companyName: args.companyName || null,
+                    phone: '',
+                    company: args.companyName || null,
                     notes: args.notes || null,
                 },
             });

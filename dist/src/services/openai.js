@@ -5,118 +5,159 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateAIResponse = generateAIResponse;
 const openai_1 = __importDefault(require("openai"));
+const client_1 = require("@prisma/client");
 const dotenv_1 = __importDefault(require("dotenv"));
-const db_1 = require("../lib/db");
-const tools_1 = require("./tools");
+const dynamicTools_1 = require("./dynamicTools");
+const rulesEngine_1 = require("./rulesEngine");
 dotenv_1.default.config();
-const openai = new openai_1.default({
-    apiKey: process.env.OPENAI_API_KEY,
-});
-const SYSTEM_PROMPT = `Eres "Vantio AI", el copiloto de IA y asistente virtual experto de Vantio Software (www.vantio-software.com). Tu objetivo es atender a los clientes que llegan buscando automatizar su negocio, darles información clara sobre nuestros productos de software y demostrarles cómo nuestras soluciones de IA les ayudan a escalar.
-
-Lineamientos de comportamiento:
-1. Idioma: Responde en el idioma del usuario (español e inglés).
-2. Tono: Profesional, innovador, directo y empático.
-3. Enfoque de Valor: Explicar automatización, incremento de conversión y escalabilidad.
-4. Captura de Datos (Lead Generation): Cuando el cliente muestre interés en una demo, asesoría o cotización, o comparta sus datos de contacto (nombre, email, empresa o detalles de su negocio), utiliza la herramienta \`capture_lead\` para guardar sus datos de forma transparente.
-5. Restricción: No inventes precios fijos. Para proyectos a medida o cotizaciones exactas, captura los datos para que un asesor los contacte.`.trim();
-async function generateAIResponse(fromNumber, userMessage) {
+const openai = new openai_1.default({ apiKey: process.env.OPENAI_API_KEY });
+const prisma = new client_1.PrismaClient();
+async function generateAIResponse(phone, userMessageText) {
     try {
-        // 1. Obtener o crear el contacto en la base de datos
-        const contact = await db_1.db.contact.upsert({
-            where: { jid: fromNumber },
-            update: {},
-            create: { jid: fromNumber },
+        // 1. Obtener el agente activo (o el primero por defecto)
+        const agent = await prisma.agent.findFirst({
+            where: { isActive: true },
+            include: {
+                externalApis: { where: { isActive: true } },
+                businessRules: { where: { isActive: true }, orderBy: { priority: 'asc' } },
+            },
         });
-        // 🛑 FILTRO DE SEGURIDAD: Si está marcado para atención humana, la IA NO responde
-        if (contact.isHandledByHuman) {
-            console.log(`🛑 [PAUSED] El contacto ${fromNumber} está en atención humana. IA silenciada.`);
-            // Guardamos el mensaje del usuario en el historial pero NO generamos respuesta de IA
-            await db_1.db.message.create({
+        if (!agent) {
+            console.error('❌ No se encontró ningún Agente activo en MySQL.');
+            return 'En este momento nuestro sistema se encuentra en mantenimiento.';
+        }
+        // 2. Buscar o crear el Contacto asignado a este Agente
+        let contact = await prisma.contact.findUnique({
+            where: {
+                agentId_phone: {
+                    agentId: agent.id,
+                    phone: phone,
+                },
+            },
+        });
+        if (!contact) {
+            contact = await prisma.contact.create({
                 data: {
-                    contactId: contact.id,
-                    role: 'user',
-                    content: userMessage,
+                    agentId: agent.id,
+                    phone: phone,
                 },
             });
-            return null; // Retornar null para que el controlador no envie nada por WhatsApp
         }
-        // 2. Guardar el nuevo mensaje del usuario
-        await db_1.db.message.create({
+        // 3. Verificar si la atención humana está activa (Handover)
+        if (contact.isHandledByHuman) {
+            console.log(`ℹ️ [HANDOVER ACTIVO] La conversación de ${phone} está asignada a un asesor humano.`);
+            return null;
+        }
+        // 4. Guardar el mensaje entrante del usuario en MySQL
+        await prisma.message.create({
             data: {
                 contactId: contact.id,
-                role: 'user',
-                content: userMessage,
+                role: client_1.MessageRole.user,
+                content: userMessageText,
+                type: client_1.MessageType.TEXT,
             },
         });
-        // 3. Consultar últimos 10 mensajes
-        const recentMessages = await db_1.db.message.findMany({
-            where: { contactId: contact.id },
-            orderBy: { createdAt: 'desc' },
-            take: 10,
-        });
-        const formattedHistory = recentMessages.reverse().map((msg) => ({
-            role: msg.role,
-            content: msg.content,
-        }));
-        let messagesList = [
-            { role: 'system', content: SYSTEM_PROMPT },
-            ...formattedHistory,
-        ];
-        console.log(`💾 Contexto cargado desde DB para ${fromNumber} (${formattedHistory.length} mensajes previos).`);
-        // 4. Primera solicitud a OpenAI enviando las herramientas disponibles
-        let completion = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
-            messages: messagesList,
-            tools: tools_1.tools,
-            tool_choice: 'auto',
-            max_tokens: 250,
-            temperature: 0.7,
-        });
-        let responseMessage = completion.choices[0].message;
-        // 5. Verificar si OpenAI decidió invocar una Tool
-        if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
-            console.log(`🛠️ La IA decidió ejecutar ${responseMessage.tool_calls.length} herramientas...`);
-            // Agregamos la decisión de la IA a la conversación
-            messagesList.push(responseMessage);
-            for (const toolCall of responseMessage.tool_calls) {
-                // 🔒 Verificación de tipo para narrowing en TypeScript
-                if (toolCall.type === 'function') {
-                    const toolName = toolCall.function.name;
-                    const toolArgs = JSON.parse(toolCall.function.arguments);
-                    console.log(`⚙️ Ejecutando función "${toolName}" con argumentos:`, toolArgs);
-                    // Ejecutamos la acción en el backend
-                    const toolResult = await (0, tools_1.executeToolCall)(toolName, toolArgs, contact.id);
-                    // Inyectamos el resultado de la herramienta en el hilo
-                    messagesList.push({
-                        role: 'tool',
-                        tool_call_id: toolCall.id,
-                        content: toolResult,
+        // 🚨 5. EVALUAR REGLAS DE NEGOCIO (PRE-PROCESAMIENTO DE IA)
+        for (const rule of agent.businessRules) {
+            const isMatch = (0, rulesEngine_1.evaluateCondition)(rule.condition, { userMessage: userMessageText });
+            if (isMatch) {
+                const ruleResult = await (0, rulesEngine_1.executeRuleAction)(rule, contact);
+                if (ruleResult.triggered && ruleResult.replyMessage) {
+                    // Guardar la respuesta de la regla en MySQL
+                    await prisma.message.create({
+                        data: {
+                            contactId: contact.id,
+                            role: client_1.MessageRole.assistant,
+                            content: ruleResult.replyMessage,
+                            type: client_1.MessageType.TEXT,
+                        },
                     });
+                    return ruleResult.replyMessage;
+                }
+                else if (ruleResult.triggered) {
+                    return null; // Silencio
                 }
             }
-            // Volvemos a consultar a OpenAI con el resultado de la función para la respuesta final al cliente
-            completion = await openai.chat.completions.create({
-                model: 'gpt-4o-mini',
-                messages: messagesList,
-                max_tokens: 250,
-                temperature: 0.7,
-            });
-            responseMessage = completion.choices[0].message;
         }
-        const aiReply = responseMessage.content || 'Gracias por tu información, nos pondremos en contacto pronto.';
-        // 6. Guardar la respuesta final de la IA en la BD
-        await db_1.db.message.create({
+        // 6. Cargar historial reciente de la base de datos (últimos 10 mensajes)
+        const pastMessages = await prisma.message.findMany({
+            where: { contactId: contact.id },
+            orderBy: { createdAt: 'asc' },
+            take: 10,
+        });
+        const formattedHistory = pastMessages.map((m) => ({
+            role: m.role,
+            content: m.content,
+        }));
+        const recentHistory = formattedHistory.slice(-8);
+        // 7. Preparar las Tools dinámicas desde MySQL
+        const tools = (0, dynamicTools_1.formatToOpenAITools)(agent.externalApis);
+        const messages = [
+            { role: 'system', content: agent.systemPrompt },
+            ...recentHistory,
+            { role: 'user', content: userMessageText },
+        ];
+        console.log(`🧠 [IA DINÁMICA] Procesando mensaje para ${phone} con Agente: "${agent.name}"...`);
+        const response = await openai.chat.completions.create({
+            model: agent.model || 'gpt-4o-mini',
+            temperature: agent.temperature,
+            messages: messages,
+            tools: tools.length > 0 ? tools : undefined,
+            tool_choice: tools.length > 0 ? 'auto' : undefined,
+        });
+        const responseMessage = response.choices[0].message;
+        // 9. Manejo de Tool Calls (APIs Dinámicas)
+        if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+            for (const toolCall of responseMessage.tool_calls) {
+                // 🛡️ Guard de TypeScript: Asegurar que sea de tipo 'function'
+                if (toolCall.type === 'function' && 'function' in toolCall) {
+                    const toolName = toolCall.function.name;
+                    const toolArgs = JSON.parse(toolCall.function.arguments || '{}');
+                    const matchedApi = agent.externalApis.find((api) => api.name === toolName);
+                    if (matchedApi) {
+                        console.log(`🛠️ [TOOL EXECUTION] Invocando "${toolName}" para ${phone}...`);
+                        const apiResultJson = await (0, dynamicTools_1.executeDynamicApi)(matchedApi, toolArgs);
+                        // Añadir respuesta de la herramienta al contexto y solicitar respuesta final
+                        messages.push(responseMessage);
+                        messages.push({
+                            role: 'tool',
+                            tool_call_id: toolCall.id,
+                            content: apiResultJson,
+                        });
+                        const secondResponse = await openai.chat.completions.create({
+                            model: agent.model || 'gpt-4o-mini',
+                            messages: messages,
+                        });
+                        const finalReply = secondResponse.choices[0].message.content || '';
+                        // Guardar la respuesta final de la IA en MySQL
+                        await prisma.message.create({
+                            data: {
+                                contactId: contact.id,
+                                role: client_1.MessageRole.assistant,
+                                content: finalReply,
+                                type: client_1.MessageType.TEXT,
+                            },
+                        });
+                        return finalReply;
+                    }
+                }
+            }
+        }
+        // 10. Respuesta estándar de texto
+        const finalReply = responseMessage.content || '';
+        // Guardar respuesta de la IA en MySQL
+        await prisma.message.create({
             data: {
                 contactId: contact.id,
-                role: 'assistant',
-                content: aiReply,
+                role: client_1.MessageRole.assistant,
+                content: finalReply,
+                type: client_1.MessageType.TEXT,
             },
         });
-        return aiReply;
+        return finalReply;
     }
     catch (error) {
-        console.error('❌ Error en el servicio de OpenAI con Function Calling:', error);
-        return 'Lo siento, tuve un problema procesando tu solicitud. ¿Podrías indicarme de nuevo tus datos o duda?';
+        console.error('❌ Error en generateAIResponse (MySQL/Prisma):', error);
+        return 'Lo siento, tuve un inconveniente procesando tu solicitud. Intentemos de nuevo.';
     }
 }

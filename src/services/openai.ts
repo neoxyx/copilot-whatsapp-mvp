@@ -94,12 +94,15 @@ export async function generateAIResponse(phone: string, userMessageText: string)
             content: m.content,
         }));
 
+        const recentHistory = formattedHistory.slice(-8);
+
         // 7. Preparar las Tools dinámicas desde MySQL
         const tools = formatToOpenAITools(agent.externalApis);
 
         const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
             { role: 'system', content: agent.systemPrompt },
-            ...formattedHistory,
+            ...recentHistory,
+            { role: 'user', content: userMessageText },
         ];
 
         console.log(`🧠 [IA DINÁMICA] Procesando mensaje para ${phone} con Agente: "${agent.name}"...`);
